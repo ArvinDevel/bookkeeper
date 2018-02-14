@@ -46,6 +46,17 @@ groups:
     default: ''
   - param: ignoreExtraServerComponentsStartupFailures
     description: Whether the bookie should ignore startup failures on loading server components specified by `extraServerComponents`.
+  - param: skipListArenaChunkSize
+    description: The number of bytes we should use as chunk allocation for org.apache.bookkeeper.bookie.SkipListArena
+    default: 4194304
+  - param: skipListArenaMaxAllocSize
+    description: The max size we should allocate from the skiplist arena. Allocations larger than this should be allocated directly by the VM to avoid fragmentation.
+    default: 131072
+  - param: bookieAuthProviderFactoryClass
+    description: The bookie authentication provider factory class name. If this is null, no authentication will take place.
+    default: null
+  - param: enableBookieScanner
+    description: Whether enable BookieScanner which is used to check ledger's integrity.
     default: 'false'
 
 - name: Worker thread settings
