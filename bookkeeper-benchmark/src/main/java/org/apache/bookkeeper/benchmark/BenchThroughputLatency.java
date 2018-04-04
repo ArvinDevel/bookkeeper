@@ -26,16 +26,19 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.util.Arrays;
+import java.util.Enumeration;
 import java.util.Random;
 import java.util.Timer;
 import java.util.TimerTask;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import org.apache.bookkeeper.client.AsyncCallback.AddCallback;
 import org.apache.bookkeeper.client.BKException;
 import org.apache.bookkeeper.client.BookKeeper;
+import org.apache.bookkeeper.client.LedgerEntry;
 import org.apache.bookkeeper.client.LedgerHandle;
 import org.apache.bookkeeper.conf.ClientConfiguration;
 import org.apache.commons.cli.CommandLine;
@@ -64,11 +67,21 @@ public class BenchThroughputLatency implements AddCallback, Runnable {
     BookKeeper bk;
     LedgerHandle lh[];
     AtomicLong counter;
+    AtomicInteger read = new AtomicInteger(0);
+
 
     Semaphore sem;
     int numberOfLedgers = 1;
     final int sendLimit;
+    final long writeTimes[][];
     final long latencies[];
+    final long e2elatencies[];
+    final long readTp[];
+    final long readDuration;
+    final boolean sync;
+    final boolean e2eEnabled;
+    byte[] passwd;
+    CountDownLatch countDownLatch;
 
     static class Context {
         long localStartTime;
@@ -81,14 +94,20 @@ public class BenchThroughputLatency implements AddCallback, Runnable {
     }
 
     public BenchThroughputLatency(int ensemble, int writeQuorumSize, int ackQuorumSize, byte[] passwd,
-            int numberOfLedgers, int sendLimit, ClientConfiguration conf)
+            int numberOfLedgers, int sendLimit, boolean sync, boolean e2eEnabled, ClientConfiguration conf)
             throws BKException, IOException, InterruptedException {
         this.sem = new Semaphore(conf.getThrottleValue());
         bk = new BookKeeper(conf);
         this.counter = new AtomicLong(0);
         this.numberOfLedgers = numberOfLedgers;
         this.sendLimit = sendLimit;
-        this.latencies = new long[sendLimit];
+        this.latencies = new long[sendLimit * numberOfLedgers];
+        this.e2elatencies = new long[sendLimit * numberOfLedgers];
+        this.readTp = new long[numberOfLedgers];
+        this.writeTimes = new long[numberOfLedgers][sendLimit];
+        this.passwd = passwd;
+        this.countDownLatch = new CountDownLatch(numberOfLedgers);
+        this.readDuration = 0L;
         try {
             lh = new LedgerHandle[this.numberOfLedgers];
 
@@ -102,6 +121,10 @@ public class BenchThroughputLatency implements AddCallback, Runnable {
         } catch (BKException e) {
             e.printStackTrace();
         }
+
+        this.sync = sync;
+        this.e2eEnabled = e2eEnabled;
+
     }
 
     Random rand = new Random();
@@ -132,29 +155,52 @@ public class BenchThroughputLatency implements AddCallback, Runnable {
         return duration;
     }
 
-    public void run() {
-        LOG.info("Running...");
+    private void syncWrite() throws Exception{
+        long start = previous = System.currentTimeMillis();
+        int sent = 0;
+        while (sent < sendLimit * numberOfLedgers) {
+            final int index = sent % numberOfLedgers;
+            LedgerHandle h = lh[index];
+            if (h == null) {
+                LOG.error("Handle " + index + " is null!");
+            } else {
+                long beforeSend = System.nanoTime();
+                writeTimes[index][sent / numberOfLedgers] = beforeSend;
+                lh[index].addEntry(bytes);
+                latencies[sent] = System.nanoTime() - beforeSend;
+            }
+            sent++;
+        }
+        LOG.info("Sent: "  + sent);
+        synchronized (this) {
+            duration = System.currentTimeMillis() - start;
+        }
+        throughput = ((long) (sent * 1000.0) /  getDuration());
+        LOG.info("Finished processing in ms: " + getDuration() + " tp = " + throughput);
+    }
+
+    private void ayncWrite(){
         long start = previous = System.currentTimeMillis();
 
         int sent = 0;
 
         Thread reporter = new Thread() {
-                public void run() {
-                    try {
-                        while (true) {
-                            Thread.sleep(1000);
-                            LOG.info("ms: {} req: {}", System.currentTimeMillis(), completedRequests.getAndSet(0));
-                        }
-                    } catch (InterruptedException ie) {
-                        LOG.info("Caught interrupted exception, going away");
-                        Thread.currentThread().interrupt();
+            public void run() {
+                try {
+                    while (true) {
+                        Thread.sleep(1000);
+                        LOG.info("ms: {} req: {}", System.currentTimeMillis(), completedRequests.getAndSet(0));
                     }
+                } catch (InterruptedException ie) {
+                    LOG.info("Caught interrupted exception, going away");
+                    Thread.currentThread().interrupt();
                 }
-            };
+            }
+        };
         reporter.start();
         long beforeSend = System.nanoTime();
 
-        while (!Thread.currentThread().isInterrupted() && sent < sendLimit) {
+        while (!Thread.currentThread().isInterrupted() && sent < sendLimit * numberOfLedgers) {
             try {
                 sem.acquire();
                 if (sent == 10000) {
@@ -167,26 +213,24 @@ public class BenchThroughputLatency implements AddCallback, Runnable {
                 break;
             }
 
-            final int index = getRandomLedger();
+            final int index = sent % numberOfLedgers;
             LedgerHandle h = lh[index];
-            if (h == null) {
-                LOG.error("Handle " + index + " is null!");
+            if (h == null || h.isClosed()) {
+                LOG.error("Handle " + index + " is null or closed!");
             } else {
                 long nanoTime = System.nanoTime();
+                writeTimes[index][sent / numberOfLedgers] = nanoTime;
                 lh[index].asyncAddEntry(bytes, this, new Context(sent, nanoTime));
+                latencies[sent] = System.nanoTime() - nanoTime;
                 counter.incrementAndGet();
             }
             sent++;
         }
         LOG.info("Sent: "  + sent);
         try {
-            int i = 0;
+            // wait until all entries are replied
             while (this.counter.get() > 0) {
-                Thread.sleep(1000);
-                i++;
-                if (i > 30) {
-                    break;
-                }
+                Thread.sleep(500);
             }
         } catch (InterruptedException e) {
             LOG.error("Interrupted while waiting", e);
@@ -195,8 +239,9 @@ public class BenchThroughputLatency implements AddCallback, Runnable {
         synchronized (this) {
             duration = System.currentTimeMillis() - start;
         }
-        throughput = sent * 1000 / getDuration();
-
+        // may cause data losing
+//        throughput = sent * 1000 / getDuration();
+        throughput = ((long) (sent * 1000.0) /  getDuration());
         reporter.interrupt();
         try {
             reporter.join();
@@ -204,6 +249,124 @@ public class BenchThroughputLatency implements AddCallback, Runnable {
             Thread.currentThread().interrupt();
         }
         LOG.info("Finished processing in ms: " + getDuration() + " tp = " + throughput);
+    }
+
+    private void read(){
+        final LedgerHandle[] readLedgers = new LedgerHandle[this.numberOfLedgers];
+        try {
+            for (int i = 0; i < this.numberOfLedgers; i++) {
+                readLedgers[i] = bk.openLedgerNoRecovery(lh[i].getId(), BookKeeper.DigestType.CRC32,
+                        passwd);
+                LOG.debug("Ledger Handle for read : " + readLedgers[i].getId());
+            }
+        } catch (BKException e) {
+            e.printStackTrace();
+        } catch (InterruptedException ie){
+            Thread.currentThread().interrupt();
+        }
+        for (int i = 0; i < this.numberOfLedgers; i++) {
+            LedgerHandle ledgerHandle = readLedgers[i];
+                    new Thread(){
+                public void run(){
+                    try {
+                        readLedger(readLedgers, ledgerHandle);
+                    } catch (BKException bke){
+                        LOG.error("occur bke when read from ledger:{} , stop reading",
+                                ledgerHandle == null ? " " : "" + ledgerHandle.getId(), bke);
+                    }
+                }
+            }.start();
+        }
+    }
+    // todo why can't use the same reader?
+    private void readLedger(LedgerHandle[] lhs, LedgerHandle lh) throws BKException{
+        LOG.info("Reading ledger {}", lh.getId());
+        long ledgerId = lh.getId();
+        long time = 0;
+        long entriesRead = 0;
+        long lastRead = 0;
+        int nochange = 0;
+        int index = 0;
+        for (int i = 0; i < lhs.length; i++){
+            if (lhs[i] == lh){
+                index = i;
+            }
+        }
+        LOG.info("Reading ledger index is {}", index);
+
+        long absoluteLimit = 5000000;
+        try {
+            while (true) {
+                // why can't use the same lh ? getLastAddConfirmed's effect ?!
+                lh = bk.openLedgerNoRecovery(ledgerId, BookKeeper.DigestType.CRC32,
+                        passwd);
+                long lastConfirmed = Math.min(lh.getLastAddConfirmed(), absoluteLimit);
+                if (lastConfirmed == lastRead) {
+                    nochange++;
+                    if (nochange == 10) {
+                        break;
+                    } else {
+                        Thread.sleep(1000);
+                        continue;
+                    }
+                } else {
+                    nochange = 0;
+                }
+                long starttime = System.nanoTime();
+
+                while (lastRead < lastConfirmed) {
+                    long nextLimit = lastRead + 100000;
+                    long readTo = Math.min(nextLimit, lastConfirmed);
+                    Enumeration<LedgerEntry> entries = lh.readEntries(lastRead + 1, readTo);
+                    lastRead = readTo;
+                    while (entries.hasMoreElements()) {
+                        LedgerEntry e = entries.nextElement();
+                        e2elatencies[read.getAndIncrement()] =
+                                System.nanoTime() - writeTimes[index][(int) e.getEntryId()];
+                        entriesRead++;
+                        if ((entriesRead % 10000) == 0) {
+                            LOG.info("{} entries read", entriesRead);
+                        }
+                    }
+                }
+                long endtime = System.nanoTime();
+                time += endtime - starttime;
+                lh.close();
+                lh = null;
+                Thread.sleep(1000);
+            }
+        } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+        } catch (BKException.BKLedgerClosedException bkce){
+            LOG.error("Open closed ledger error", bkce);
+        } finally {
+            countDownLatch.countDown();
+            readTp[index] = (long) ((double) (entriesRead * 1000 * 1000 * 1000.0) / (double) time);
+
+            LOG.info("Read {} in {}ms, get {} ops/sec", entriesRead, time / 1000 / 1000, readTp[index]);
+
+            try {
+                if (lh != null) {
+                    lh.close();
+                }
+            } catch (Exception e) {
+                LOG.error("Exception closing stuff", e);
+            }
+        }
+    }
+
+
+    public void run() {
+        LOG.info("Running...");
+        if (sync){
+            try {
+                syncWrite();
+            } catch (Exception e){
+                LOG.error("Occur exception when use sync write", e);
+            }
+        } else {
+            ayncWrite();
+        }
     }
 
     long throughput = -1;
@@ -227,7 +390,6 @@ public class BenchThroughputLatency implements AddCallback, Runnable {
         counter.decrementAndGet();
 
         if (rc == 0) {
-            latencies[(int) entryId] = newTime;
             completedRequests.incrementAndGet();
         }
     }
@@ -249,8 +411,10 @@ public class BenchThroughputLatency implements AddCallback, Runnable {
         options.addOption("timeout", true, "Number of seconds after which to give up");
         options.addOption("sockettimeout", true, "Socket timeout for bookkeeper client. In seconds. Default 5");
         options.addOption("skipwarmup", false, "Skip warm up, default false");
-        options.addOption("sendlimit", true, "Max number of entries to send. Default 20000000");
+        options.addOption("sendlimit", true, "Max number of entries to send(per ledger). Default 20000000");
         options.addOption("latencyFile", true, "File to dump latencies. Default is latencyDump.dat");
+        options.addOption("sync", true, "Write method sync or async. Default is async(0)");
+        options.addOption("e2e", true, "Whether test reader & writer and e2e latency. Default is false(0)");
         options.addOption("help", false, "This message");
 
         CommandLineParser parser = new PosixParser();
@@ -275,6 +439,8 @@ public class BenchThroughputLatency implements AddCallback, Runnable {
         }
         int throttle = Integer.parseInt(cmd.getOptionValue("throttle", "10000"));
         int sendLimit = Integer.parseInt(cmd.getOptionValue("sendlimit", "20000000"));
+        int sync = Integer.parseInt(cmd.getOptionValue("sync", "0"));
+        int e2e = Integer.parseInt(cmd.getOptionValue("e2e", "0"));
 
         final int sockTimeout = Integer.parseInt(cmd.getOptionValue("sockettimeout", "5"));
 
@@ -299,6 +465,7 @@ public class BenchThroughputLatency implements AddCallback, Runnable {
                 + ", entry size: " + entrysize + ", ensemble size: " + ensemble
                 + ", quorum size: " + quorum
                 + ", throttle: " + throttle
+                + ", e2e: " + e2e
                 + ", number of ledgers: " + ledgers
                 + ", zk servers: " + servers
                 + ", latency file: " + latencyFile);
@@ -326,7 +493,7 @@ public class BenchThroughputLatency implements AddCallback, Runnable {
 
         // Now do the benchmark
         BenchThroughputLatency bench = new BenchThroughputLatency(ensemble, quorum, ackQuorum,
-                passwd, ledgers, sendLimit, conf);
+                passwd, ledgers, sendLimit, sync > 0 , e2e > 0, conf);
         bench.setEntryData(data);
         thread = new Thread(bench);
         ZooKeeper zk = null;
@@ -361,11 +528,20 @@ public class BenchThroughputLatency implements AddCallback, Runnable {
             LOG.info("Coordination znode created");
         }
         thread.start();
+        Thread readThread = new Thread(){
+            public void run(){
+                bench.read();
+            }
+        };
+
+        if (bench.e2eEnabled){
+            readThread.start();
+        }
         Thread.sleep(totalTime);
         thread.interrupt();
         thread.join();
 
-        LOG.info("Calculating percentiles");
+        LOG.info("Calculating percentiles for write");
 
         int numlat = 0;
         for (int i = 0; i < bench.latencies.length; i++) {
@@ -397,7 +573,11 @@ public class BenchThroughputLatency implements AddCallback, Runnable {
 
         // dump the latencies for later debugging (it will be sorted by entryid)
         OutputStream fos = new BufferedOutputStream(new FileOutputStream(latencyFile));
-
+        fos.write((Long.toString(tp * entrysize) + "\t" + " bytes/s\n").getBytes(UTF_8));
+        fos.write(("99th percentile write latency: " + percentile(latency, 99) + "\n").getBytes(UTF_8));
+        fos.write(("95th percentile write latency: " + percentile(latency, 95) + "\n").getBytes(UTF_8));
+        fos.write(("99'th  latency: " + latency[numlat * 99 / 100] + "\n").getBytes(UTF_8));
+        fos.write(("95'th  latency: " + latency[numlat * 95 / 100] + "\n").getBytes(UTF_8));
         for (Long l: latency) {
             fos.write((Long.toString(l) + "\t" + (l / 1000000) + "ms\n").getBytes(UTF_8));
         }
@@ -405,6 +585,50 @@ public class BenchThroughputLatency implements AddCallback, Runnable {
         fos.close();
 
         // now get the latencies
+        LOG.info("99th percentile latency: {}", percentile(latency, 99));
+        LOG.info("95th percentile latency: {}", percentile(latency, 95));
+
+        // waiting until read finish
+        bench.countDownLatch.await();
+
+        LOG.info("Read finished, Calculating percentiles for e2e");
+        // dump the e2e latencies
+
+        numlat = 0;
+        for (int i = 0; i < bench.e2elatencies.length; i++) {
+            if (bench.e2elatencies[i] > 0) {
+                numlat++;
+            }
+        }
+        numcompletions = numlat;
+        numlat = Math.min(bench.sendLimit, numlat);
+        latency = new long[numlat];
+        j = 0;
+        for (int i = 0; i < bench.e2elatencies.length && j < numlat; i++) {
+            if (bench.e2elatencies[i] > 0) {
+                latency[j++] = bench.e2elatencies[i];
+            }
+        }
+        Arrays.sort(latency);
+
+        LOG.info(numcompletions + " read completions ");
+        tp = 0;
+        for (int i = 0; i < bench.numberOfLedgers; i++){
+            tp += bench.readTp[i];
+        }
+        fos = new BufferedOutputStream(new FileOutputStream(latencyFile + "e2e"));
+        fos.write((Long.toString(tp * entrysize) + "\t" + " bytes/s\n").getBytes(UTF_8));
+        fos.write(("99th percentile e2e latency: " + percentile(latency, 99) + "\n").getBytes(UTF_8));
+        fos.write(("95th percentile e2e latency: " + percentile(latency, 95) + "\n").getBytes(UTF_8));
+        fos.write(("99'th  latency: " + latency[numlat * 99 / 100] + "\n").getBytes(UTF_8));
+        fos.write(("95'th  latency: " + latency[numlat * 95 / 100] + "\n").getBytes(UTF_8));
+
+        for (Long l: latency) {
+            fos.write((Long.toString(l) + "\t" + (l / 1000000) + "ms\n").getBytes(UTF_8));
+        }
+        fos.flush();
+        fos.close();
+
         LOG.info("99th percentile latency: {}", percentile(latency, 99));
         LOG.info("95th percentile latency: {}", percentile(latency, 95));
 
@@ -452,7 +676,7 @@ public class BenchThroughputLatency implements AddCallback, Runnable {
         }
 
         BenchThroughputLatency warmup = new BenchThroughputLatency(bookies, bookies, bookies, passwd,
-                                                                   ledgers, 10000, conf);
+                                                                   ledgers, 10000, false, false, conf);
         warmup.setEntryData(data);
         Thread thread = new Thread(warmup);
         thread.start();
