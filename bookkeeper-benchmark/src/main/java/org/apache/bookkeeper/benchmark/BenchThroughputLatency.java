@@ -77,7 +77,6 @@ public class BenchThroughputLatency implements AddCallback, Runnable {
     final long latencies[];
     final long e2elatencies[];
     final long readTp[];
-    final long readDuration;
     final boolean sync;
     final boolean e2eEnabled;
     byte[] passwd;
@@ -107,7 +106,6 @@ public class BenchThroughputLatency implements AddCallback, Runnable {
         this.writeTimes = new long[numberOfLedgers][sendLimit];
         this.passwd = passwd;
         this.countDownLatch = new CountDownLatch(numberOfLedgers);
-        this.readDuration = 0L;
         try {
             lh = new LedgerHandle[this.numberOfLedgers];
 
@@ -278,7 +276,7 @@ public class BenchThroughputLatency implements AddCallback, Runnable {
             }.start();
         }
     }
-    // todo why can't use the same reader?
+    // todo use one thread to read and call async read, need ledger id, index mapping
     private void readLedger(LedgerHandle[] lhs, LedgerHandle lh) throws BKException{
         LOG.info("Reading ledger {}", lh.getId());
         long ledgerId = lh.getId();
@@ -534,8 +532,11 @@ public class BenchThroughputLatency implements AddCallback, Runnable {
             }
         };
 
+        long start = 0;
+
         if (bench.e2eEnabled){
             readThread.start();
+            start = System.currentTimeMillis();
         }
         Thread.sleep(totalTime);
         thread.interrupt();
@@ -574,10 +575,10 @@ public class BenchThroughputLatency implements AddCallback, Runnable {
         // dump the latencies for later debugging (it will be sorted by entryid)
         OutputStream fos = new BufferedOutputStream(new FileOutputStream(latencyFile));
         fos.write((Long.toString(tp * entrysize) + "\t" + " bytes/s\n").getBytes(UTF_8));
-        fos.write(("99th percentile write latency: " + percentile(latency, 99) + "\n").getBytes(UTF_8));
-        fos.write(("95th percentile write latency: " + percentile(latency, 95) + "\n").getBytes(UTF_8));
-        fos.write(("99'th  latency: " + latency[numlat * 99 / 100] + "\n").getBytes(UTF_8));
-        fos.write(("95'th  latency: " + latency[numlat * 95 / 100] + "\n").getBytes(UTF_8));
+        fos.write(("99th percentile write latency(ms): " + percentile(latency, 99) + "\n").getBytes(UTF_8));
+        fos.write(("95th percentile write latency(ms): " + percentile(latency, 95) + "\n").getBytes(UTF_8));
+        fos.write(("99'th  latency(ms): " + latency[numlat * 99 / 100] / 1000000.0 + "\n").getBytes(UTF_8));
+        fos.write(("95'th  latency(ms): " + latency[numlat * 95 / 100] / 1000000.0 + "\n").getBytes(UTF_8));
         for (Long l: latency) {
             fos.write((Long.toString(l) + "\t" + (l / 1000000) + "ms\n").getBytes(UTF_8));
         }
@@ -588,8 +589,12 @@ public class BenchThroughputLatency implements AddCallback, Runnable {
         LOG.info("99th percentile latency: {}", percentile(latency, 99));
         LOG.info("95th percentile latency: {}", percentile(latency, 95));
 
+        if (!bench.e2eEnabled){
+            return;
+        }
         // waiting until read finish
         bench.countDownLatch.await();
+        long readDuration = System.currentTimeMillis() - start;
 
         LOG.info("Read finished, Calculating percentiles for e2e");
         // dump the e2e latencies
@@ -616,12 +621,22 @@ public class BenchThroughputLatency implements AddCallback, Runnable {
         for (int i = 0; i < bench.numberOfLedgers; i++){
             tp += bench.readTp[i];
         }
+        long readTp = (long) ((double) (numcompletions * 1000.0) / (double) readDuration);
         fos = new BufferedOutputStream(new FileOutputStream(latencyFile + "e2e"));
-        fos.write((Long.toString(tp * entrysize) + "\t" + " bytes/s\n").getBytes(UTF_8));
-        fos.write(("99th percentile e2e latency: " + percentile(latency, 99) + "\n").getBytes(UTF_8));
-        fos.write(("95th percentile e2e latency: " + percentile(latency, 95) + "\n").getBytes(UTF_8));
-        fos.write(("99'th  latency: " + latency[numlat * 99 / 100] + "\n").getBytes(UTF_8));
-        fos.write(("95'th  latency: " + latency[numlat * 95 / 100] + "\n").getBytes(UTF_8));
+        fos.write((Long.toString(tp * entrysize) + "\t" + " bytes/s (sumed)\n").getBytes(UTF_8));
+        fos.write((Long.toString(readTp * entrysize) + "\t" + " bytes/s (main threaded)\n").getBytes(UTF_8));
+        fos.write(("99th percentile e2e latency(ms): " + percentile(latency, 99) + "\n").getBytes(UTF_8));
+        fos.write(("95th percentile e2e latency(ms): " + percentile(latency, 95) + "\n").getBytes(UTF_8));
+        fos.write(("99.9'th  latency(ms): " + latency[(int) (numlat * 99.9 / 100)] / 1000000.0 + "\n").getBytes(UTF_8));
+        fos.write(("99'th  latency(ms): " + latency[numlat * 99 / 100 ] / 1000000.0 + "\n").getBytes(UTF_8));
+        fos.write(("95'th  latency(ms): " + latency[numlat * 95 / 100] / 1000000.0 + "\n").getBytes(UTF_8));
+        fos.write(("75'th  latency(ms): " + latency[numlat * 75 / 100] / 1000000.0 + "\n").getBytes(UTF_8));
+        fos.write(("mean  latency(ms): " + latency[numlat / 2] / 1000000.0 + "\n").getBytes(UTF_8));
+        fos.write(("40'th  latency(ms): " + latency[numlat * 40 / 100] / 1000000.0 + "\n").getBytes(UTF_8));
+        fos.write(("20'th  latency(ms): " + latency[numlat / 5] / 1000000.0 + "\n").getBytes(UTF_8));
+        fos.write(("10'th  latency(ms): " + latency[numlat / 10] / 1000000.0 + "\n").getBytes(UTF_8));
+        fos.write(("max  latency(ms): " + latency[numlat - 1] / 1000000.0 + "\n").getBytes(UTF_8));
+        fos.write(("min  latency(ns): " + latency[0] + "\n").getBytes(UTF_8));
 
         for (Long l: latency) {
             fos.write((Long.toString(l) + "\t" + (l / 1000000) + "ms\n").getBytes(UTF_8));
