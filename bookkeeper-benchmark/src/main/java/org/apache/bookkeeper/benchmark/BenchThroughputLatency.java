@@ -105,7 +105,11 @@ public class BenchThroughputLatency implements AddCallback, Runnable {
         this.readTp = new long[numberOfLedgers];
         this.writeTimes = new long[numberOfLedgers][sendLimit];
         this.passwd = passwd;
-        this.countDownLatch = new CountDownLatch(numberOfLedgers);
+        if (e2eEnabled){
+            this.countDownLatch = new CountDownLatch(numberOfLedgers);
+        } else {
+            this.countDownLatch = new CountDownLatch(0);
+        }
         try {
             lh = new LedgerHandle[this.numberOfLedgers];
 
@@ -219,7 +223,7 @@ public class BenchThroughputLatency implements AddCallback, Runnable {
                 long nanoTime = System.nanoTime();
                 writeTimes[index][sent / numberOfLedgers] = nanoTime;
                 lh[index].asyncAddEntry(bytes, this, new Context(sent, nanoTime));
-                latencies[sent] = System.nanoTime() - nanoTime;
+                //latencies[sent] = System.nanoTime() - nanoTime;
                 counter.incrementAndGet();
             }
             sent++;
@@ -388,6 +392,7 @@ public class BenchThroughputLatency implements AddCallback, Runnable {
         counter.decrementAndGet();
 
         if (rc == 0) {
+            latencies[(int) entryId] = newTime;
             completedRequests.incrementAndGet();
         }
     }
@@ -589,64 +594,64 @@ public class BenchThroughputLatency implements AddCallback, Runnable {
         LOG.info("99th percentile latency: {}", percentile(latency, 99));
         LOG.info("95th percentile latency: {}", percentile(latency, 95));
 
-        if (!bench.e2eEnabled){
-            return;
-        }
-        // waiting until read finish
-        bench.countDownLatch.await();
-        long readDuration = System.currentTimeMillis() - start;
+        if (bench.e2eEnabled) {
+            //todo it seams that
+            // waiting until read finish
+            bench.countDownLatch.await();
+            long readDuration = System.currentTimeMillis() - start;
 
-        LOG.info("Read finished, Calculating percentiles for e2e");
-        // dump the e2e latencies
+            LOG.info("Read finished, Calculating percentiles for e2e");
+            // dump the e2e latencies
 
-        numlat = 0;
-        for (int i = 0; i < bench.e2elatencies.length; i++) {
-            if (bench.e2elatencies[i] > 0) {
-                numlat++;
+            numlat = 0;
+            for (int i = 0; i < bench.e2elatencies.length; i++) {
+                if (bench.e2elatencies[i] > 0) {
+                    numlat++;
+                }
             }
-        }
-        numcompletions = numlat;
-        numlat = Math.min(bench.sendLimit, numlat);
-        latency = new long[numlat];
-        j = 0;
-        for (int i = 0; i < bench.e2elatencies.length && j < numlat; i++) {
-            if (bench.e2elatencies[i] > 0) {
-                latency[j++] = bench.e2elatencies[i];
+            numcompletions = numlat;
+            numlat = Math.min(bench.sendLimit, numlat);
+            latency = new long[numlat];
+            j = 0;
+            for (int i = 0; i < bench.e2elatencies.length && j < numlat; i++) {
+                if (bench.e2elatencies[i] > 0) {
+                    latency[j++] = bench.e2elatencies[i];
+                }
             }
+            Arrays.sort(latency);
+
+            LOG.info(numcompletions + " read completions ");
+            tp = 0;
+            for (int i = 0; i < bench.numberOfLedgers; i++) {
+                tp += bench.readTp[i];
+            }
+            long readTp = (long) ((double) (numcompletions * 1000.0) / (double) readDuration);
+            fos = new BufferedOutputStream(new FileOutputStream(latencyFile + "e2e"));
+            fos.write((Long.toString(tp * entrysize) + "\t" + " bytes/s (sumed)\n").getBytes(UTF_8));
+            fos.write((Long.toString(readTp * entrysize) + "\t" + " bytes/s (main threaded)\n").getBytes(UTF_8));
+            fos.write(("99th percentile e2e latency(ms): " + percentile(latency, 99) + "\n").getBytes(UTF_8));
+            fos.write(("95th percentile e2e latency(ms): " + percentile(latency, 95) + "\n").getBytes(UTF_8));
+            fos.write(("99.9'th  latency(ms): " + latency[(int) (numlat * 99.9 / 100)] / 1000000.0 + "\n")
+                    .getBytes(UTF_8));
+            fos.write(("99'th  latency(ms): " + latency[numlat * 99 / 100] / 1000000.0 + "\n").getBytes(UTF_8));
+            fos.write(("95'th  latency(ms): " + latency[numlat * 95 / 100] / 1000000.0 + "\n").getBytes(UTF_8));
+            fos.write(("75'th  latency(ms): " + latency[numlat * 75 / 100] / 1000000.0 + "\n").getBytes(UTF_8));
+            fos.write(("mean  latency(ms): " + latency[numlat / 2] / 1000000.0 + "\n").getBytes(UTF_8));
+            fos.write(("40'th  latency(ms): " + latency[numlat * 40 / 100] / 1000000.0 + "\n").getBytes(UTF_8));
+            fos.write(("20'th  latency(ms): " + latency[numlat / 5] / 1000000.0 + "\n").getBytes(UTF_8));
+            fos.write(("10'th  latency(ms): " + latency[numlat / 10] / 1000000.0 + "\n").getBytes(UTF_8));
+            fos.write(("max  latency(ms): " + latency[numlat - 1] / 1000000.0 + "\n").getBytes(UTF_8));
+            fos.write(("min  latency(ns): " + latency[0] + "\n").getBytes(UTF_8));
+
+            for (Long l : latency) {
+                fos.write((Long.toString(l) + "\t" + (l / 1000000) + "ms\n").getBytes(UTF_8));
+            }
+            fos.flush();
+            fos.close();
+
+            LOG.info("99th percentile latency: {}", percentile(latency, 99));
+            LOG.info("95th percentile latency: {}", percentile(latency, 95));
         }
-        Arrays.sort(latency);
-
-        LOG.info(numcompletions + " read completions ");
-        tp = 0;
-        for (int i = 0; i < bench.numberOfLedgers; i++){
-            tp += bench.readTp[i];
-        }
-        long readTp = (long) ((double) (numcompletions * 1000.0) / (double) readDuration);
-        fos = new BufferedOutputStream(new FileOutputStream(latencyFile + "e2e"));
-        fos.write((Long.toString(tp * entrysize) + "\t" + " bytes/s (sumed)\n").getBytes(UTF_8));
-        fos.write((Long.toString(readTp * entrysize) + "\t" + " bytes/s (main threaded)\n").getBytes(UTF_8));
-        fos.write(("99th percentile e2e latency(ms): " + percentile(latency, 99) + "\n").getBytes(UTF_8));
-        fos.write(("95th percentile e2e latency(ms): " + percentile(latency, 95) + "\n").getBytes(UTF_8));
-        fos.write(("99.9'th  latency(ms): " + latency[(int) (numlat * 99.9 / 100)] / 1000000.0 + "\n").getBytes(UTF_8));
-        fos.write(("99'th  latency(ms): " + latency[numlat * 99 / 100 ] / 1000000.0 + "\n").getBytes(UTF_8));
-        fos.write(("95'th  latency(ms): " + latency[numlat * 95 / 100] / 1000000.0 + "\n").getBytes(UTF_8));
-        fos.write(("75'th  latency(ms): " + latency[numlat * 75 / 100] / 1000000.0 + "\n").getBytes(UTF_8));
-        fos.write(("mean  latency(ms): " + latency[numlat / 2] / 1000000.0 + "\n").getBytes(UTF_8));
-        fos.write(("40'th  latency(ms): " + latency[numlat * 40 / 100] / 1000000.0 + "\n").getBytes(UTF_8));
-        fos.write(("20'th  latency(ms): " + latency[numlat / 5] / 1000000.0 + "\n").getBytes(UTF_8));
-        fos.write(("10'th  latency(ms): " + latency[numlat / 10] / 1000000.0 + "\n").getBytes(UTF_8));
-        fos.write(("max  latency(ms): " + latency[numlat - 1] / 1000000.0 + "\n").getBytes(UTF_8));
-        fos.write(("min  latency(ns): " + latency[0] + "\n").getBytes(UTF_8));
-
-        for (Long l: latency) {
-            fos.write((Long.toString(l) + "\t" + (l / 1000000) + "ms\n").getBytes(UTF_8));
-        }
-        fos.flush();
-        fos.close();
-
-        LOG.info("99th percentile latency: {}", percentile(latency, 99));
-        LOG.info("95th percentile latency: {}", percentile(latency, 95));
-
         bench.close();
         timeouter.cancel();
     }
