@@ -20,6 +20,7 @@
  */
 package org.apache.bookkeeper.client;
 
+import static org.apache.bookkeeper.client.api.BKException.Code.ClientClosedException;
 import static org.apache.bookkeeper.common.concurrent.FutureUtils.result;
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
@@ -42,6 +43,7 @@ import org.apache.bookkeeper.client.AsyncCallback.ReadCallback;
 import org.apache.bookkeeper.client.BKException.BKBookieHandleNotAvailableException;
 import org.apache.bookkeeper.client.BKException.BKIllegalOpException;
 import org.apache.bookkeeper.client.BookKeeper.DigestType;
+import org.apache.bookkeeper.client.api.ReadHandle;
 import org.apache.bookkeeper.client.api.WriteFlag;
 import org.apache.bookkeeper.client.api.WriteHandle;
 import org.apache.bookkeeper.conf.ClientConfiguration;
@@ -93,7 +95,8 @@ public class BookKeeperTest extends BookKeeperClusterTestCase {
         ZooKeeper zk = new ZooKeeper(
             zkUtil.getZooKeeperConnectString(),
             50,
-            event -> {});
+            event -> {
+            });
         assertFalse("ZK shouldn't have connected yet", zk.getState().isConnected());
         try {
             BookKeeper bkc = new BookKeeper(conf, zk);
@@ -181,6 +184,7 @@ public class BookKeeperTest extends BookKeeperClusterTestCase {
     /**
      * Tests that when trying to use a closed BK client object we get
      * a callback error and not an InterruptedException.
+     *
      * @throws Exception
      */
     @Test
@@ -217,27 +221,27 @@ public class BookKeeperTest extends BookKeeperClusterTestCase {
             final CountDownLatch l = new CountDownLatch(1);
             final AtomicBoolean success = new AtomicBoolean(false);
             Thread t = new Thread() {
-                    public void run() {
-                        try {
-                            LedgerHandle lh = client.createLedger(3, 3, digestType, "testPasswd".getBytes());
-                            startNewBookie();
-                            killBookie(0);
-                            lh.asyncAddEntry("test".getBytes(), new AddCallback() {
-                                    @Override
-                                    public void addComplete(int rc, LedgerHandle lh, long entryId, Object ctx) {
-                                        // noop, we don't care if this completes
-                                    }
-                                }, null);
-                            client.close();
-                            success.set(true);
-                            l.countDown();
-                        } catch (Exception e) {
-                            LOG.error("Error running test", e);
-                            success.set(false);
-                            l.countDown();
-                        }
+                public void run() {
+                    try {
+                        LedgerHandle lh = client.createLedger(3, 3, digestType, "testPasswd".getBytes());
+                        startNewBookie();
+                        killBookie(0);
+                        lh.asyncAddEntry("test".getBytes(), new AddCallback() {
+                            @Override
+                            public void addComplete(int rc, LedgerHandle lh, long entryId, Object ctx) {
+                                // noop, we don't care if this completes
+                            }
+                        }, null);
+                        client.close();
+                        success.set(true);
+                        l.countDown();
+                    } catch (Exception e) {
+                        LOG.error("Error running test", e);
+                        success.set(false);
+                        l.countDown();
                     }
-                };
+                }
+            };
             t.start();
             assertTrue("Close never completed", l.await(10, TimeUnit.SECONDS));
             assertTrue("Close was not successful", success.get());
@@ -343,7 +347,7 @@ public class BookKeeperTest extends BookKeeperClusterTestCase {
             }
 
             try (BookKeeper bkReader = new BookKeeper(clientConfiguration);
-                LedgerHandle rlh = bkReader.openLedgerNoRecovery(ledgerId, digestType, "testPasswd".getBytes())) {
+                 LedgerHandle rlh = bkReader.openLedgerNoRecovery(ledgerId, digestType, "testPasswd".getBytes())) {
                 assertTrue(
                     "Expected LAC of rlh: " + (numOfEntries - 2) + " actual LAC of rlh: " + rlh.getLastAddConfirmed(),
                     (rlh.getLastAddConfirmed() == (numOfEntries - 2)));
@@ -357,14 +361,14 @@ public class BookKeeperTest extends BookKeeperClusterTestCase {
                     LedgerEntry entry = entries.nextElement();
                     String entryString = new String(entry.getEntry());
                     assertTrue("Expected entry String: " + ("foobar" + entryId)
-                        + " actual entry String: " + entryString,
+                            + " actual entry String: " + entryString,
                         entryString.equals("foobar" + entryId));
                     entryId++;
                 }
             }
 
             try (BookKeeper bkReader = new BookKeeper(clientConfiguration);
-                LedgerHandle rlh = bkReader.openLedgerNoRecovery(ledgerId, digestType, "testPasswd".getBytes())) {
+                 LedgerHandle rlh = bkReader.openLedgerNoRecovery(ledgerId, digestType, "testPasswd".getBytes())) {
                 assertTrue(
                     "Expected LAC of rlh: " + (numOfEntries - 2) + " actual LAC of rlh: " + rlh.getLastAddConfirmed(),
                     (rlh.getLastAddConfirmed() == (numOfEntries - 2)));
@@ -431,7 +435,7 @@ public class BookKeeperTest extends BookKeeperClusterTestCase {
             restartBookies();
 
             try (BookKeeper bkReader = new BookKeeper(clientConfiguration);
-                LedgerHandle rlh = bkReader.openLedgerNoRecovery(ledgerId, digestType, "testPasswd".getBytes())) {
+                 LedgerHandle rlh = bkReader.openLedgerNoRecovery(ledgerId, digestType, "testPasswd".getBytes())) {
                 assertTrue(
                     "Expected LAC of rlh: " + (numOfEntries - 2) + " actual LAC of rlh: " + rlh.getLastAddConfirmed(),
                     (rlh.getLastAddConfirmed() == (numOfEntries - 2)));
@@ -445,14 +449,14 @@ public class BookKeeperTest extends BookKeeperClusterTestCase {
                     LedgerEntry entry = entries.nextElement();
                     String entryString = new String(entry.getEntry());
                     assertTrue("Expected entry String: " + ("foobar" + entryId)
-                        + " actual entry String: " + entryString,
+                            + " actual entry String: " + entryString,
                         entryString.equals("foobar" + entryId));
                     entryId++;
                 }
             }
 
             try (BookKeeper bkReader = new BookKeeper(clientConfiguration);
-                LedgerHandle rlh = bkReader.openLedgerNoRecovery(ledgerId, digestType, "testPasswd".getBytes())) {
+                 LedgerHandle rlh = bkReader.openLedgerNoRecovery(ledgerId, digestType, "testPasswd".getBytes())) {
                 assertTrue(
                     "Expected LAC of rlh: " + (numOfEntries - 2) + " actual LAC of rlh: " + rlh.getLastAddConfirmed(),
                     (rlh.getLastAddConfirmed() == (numOfEntries - 2)));
@@ -516,7 +520,7 @@ public class BookKeeperTest extends BookKeeperClusterTestCase {
 
             // open ledger with fencing, this will repair the ledger and make the last entry readable
             try (BookKeeper bkReader = new BookKeeper(clientConfiguration);
-                LedgerHandle rlh = bkReader.openLedger(ledgerId, digestType, "testPasswd".getBytes())) {
+                 LedgerHandle rlh = bkReader.openLedger(ledgerId, digestType, "testPasswd".getBytes())) {
                 assertTrue(
                     "Expected LAC of rlh: " + (numOfEntries - 1) + " actual LAC of rlh: " + rlh.getLastAddConfirmed(),
                     (rlh.getLastAddConfirmed() == (numOfEntries - 1)));
@@ -530,7 +534,7 @@ public class BookKeeperTest extends BookKeeperClusterTestCase {
                     LedgerEntry entry = entries.nextElement();
                     String entryString = new String(entry.getEntry());
                     assertTrue("Expected entry String: " + ("foobar" + entryId)
-                        + " actual entry String: " + entryString,
+                            + " actual entry String: " + entryString,
                         entryString.equals("foobar" + entryId));
                     entryId++;
                 }
@@ -539,6 +543,67 @@ public class BookKeeperTest extends BookKeeperClusterTestCase {
             // should still be able to close as long as recovery closed the ledger
             // with the same last entryId and length as in the write handle.
             writeLh.close();
+        }
+    }
+
+    @Test
+    public void testReadHandleIsClosed() throws Exception {
+
+        ClientConfiguration clientConfiguration = new ClientConfiguration();
+        clientConfiguration.setMetadataServiceUri(zkUtil.getMetadataServiceUri());
+
+        try (BookKeeper bkWriter = new BookKeeper(clientConfiguration)) {
+            LedgerHandle writeLh = bkWriter.createLedger(digestType, "testPasswd".getBytes());
+            long ledgerId = writeLh.getId();
+            int numOfEntries = 5;
+            for (int i = 0; i < numOfEntries; i++) {
+                writeLh.addEntry(("foobar" + i).getBytes());
+            }
+
+            try (BookKeeper bkReader = new BookKeeper(clientConfiguration);
+                 ReadHandle rlh = bkReader.openLedgerNoRecovery(ledgerId, digestType, "testPasswd".getBytes())) {
+                assertTrue(
+                    "Expected LAC of rlh: " + (numOfEntries - 2) + " actual LAC of rlh: " + rlh.getLastAddConfirmed(),
+                    (rlh.getLastAddConfirmed() == (numOfEntries - 2)));
+
+                assertFalse(writeLh.isClosed());
+                assertFalse(rlh.isClosed());
+                rlh.close();
+                // the ledger state before close read handle is still alive
+                assertFalse(rlh.isClosed());
+                try {
+                    rlh.read(0, 0);
+                    fail("Read from closed read handle should fail");
+                } catch (BKException bke) {
+                    assertTrue(bke.getCode() == ClientClosedException);
+                }
+                writeLh.close();
+                // after read handle close, it can't detect whether ledger is sealed or not
+//                assertTrue(rlh.isClosed());
+                assertTrue(writeLh.isClosed());
+            }
+        }
+
+        try (BookKeeper bkWriter = new BookKeeper(clientConfiguration)) {
+            LedgerHandle writeLh = bkWriter.createLedger(digestType, "testPasswd".getBytes());
+            long ledgerId = writeLh.getId();
+            int numOfEntries = 5;
+            for (int i = 0; i < numOfEntries; i++) {
+                writeLh.addEntry(("foobar" + i).getBytes());
+            }
+
+            try (BookKeeper bkReader = new BookKeeper(clientConfiguration);
+                 ReadHandle rlh = bkReader.openLedgerNoRecovery(ledgerId, digestType, "testPasswd".getBytes())) {
+                assertTrue(
+                    "Expected LAC of rlh: " + (numOfEntries - 2) + " actual LAC of rlh: " + rlh.getLastAddConfirmed(),
+                    (rlh.getLastAddConfirmed() == (numOfEntries - 2)));
+
+                writeLh.close();
+                assertTrue(writeLh.isClosed());
+                assertTrue(rlh.isClosed());
+                rlh.close();
+                assertTrue(rlh.isClosed());
+            }
         }
     }
 
@@ -562,7 +627,7 @@ public class BookKeeperTest extends BookKeeperClusterTestCase {
                 try (LedgerHandle lh = bkc.openLedger(ledgerId, digestType, "testPasswd".getBytes())) {
                     assertEquals(numEntries - 1, lh.readLastConfirmed());
                     for (Enumeration<LedgerEntry> readEntries = lh.readEntries(0, numEntries - 1);
-                        readEntries.hasMoreElements();) {
+                         readEntries.hasMoreElements(); ) {
                         LedgerEntry entry = readEntries.nextElement();
                         assertArrayEquals(data, entry.getEntry());
                     }
@@ -580,7 +645,7 @@ public class BookKeeperTest extends BookKeeperClusterTestCase {
                     try {
                         lh2.addEntry(data);
                         fail("ledger should be fenced");
-                    } catch (BKException.BKLedgerFencedException ex){
+                    } catch (BKException.BKLedgerFencedException ex) {
                     }
                 }
             }
@@ -613,7 +678,7 @@ public class BookKeeperTest extends BookKeeperClusterTestCase {
             try (LedgerHandle lh = bkc.openLedger(ledgerId, digestType, "testPasswd".getBytes())) {
                 assertEquals(numEntries - 1, lh.readLastConfirmed());
                 for (Enumeration<LedgerEntry> readEntries = lh.readEntries(0, numEntries - 1);
-                    readEntries.hasMoreElements();) {
+                     readEntries.hasMoreElements(); ) {
                     LedgerEntry entry = readEntries.nextElement();
                     try {
                         entry.data.release();
@@ -634,7 +699,7 @@ public class BookKeeperTest extends BookKeeperClusterTestCase {
             try (LedgerHandle lh = bkc.openLedger(ledgerId, digestType, "testPasswd".getBytes())) {
                 assertEquals(numEntries - 1, lh.readLastConfirmed());
                 for (Enumeration<LedgerEntry> readEntries = lh.readEntries(0, numEntries - 1);
-                    readEntries.hasMoreElements();) {
+                     readEntries.hasMoreElements(); ) {
                     LedgerEntry entry = readEntries.nextElement();
                     try {
                         entry.data.release();
@@ -654,7 +719,7 @@ public class BookKeeperTest extends BookKeeperClusterTestCase {
             try (LedgerHandle lh = bkc.openLedger(ledgerId, digestType, "testPasswd".getBytes())) {
                 assertEquals(numEntries - 1, lh.readLastConfirmed());
                 for (Enumeration<LedgerEntry> readEntries = lh.readEntries(0, numEntries - 1);
-                    readEntries.hasMoreElements();) {
+                     readEntries.hasMoreElements(); ) {
                     LedgerEntry entry = readEntries.nextElement();
                     assertTrue("Can't release entry " + entry.getEntryId() + ": ref = " + entry.data.refCnt(),
                         entry.data.release());
@@ -678,7 +743,7 @@ public class BookKeeperTest extends BookKeeperClusterTestCase {
             try (LedgerHandle lh = bkc.openLedger(ledgerId, digestType, "testPasswd".getBytes())) {
                 assertEquals(numEntries - 1, lh.readLastConfirmed());
                 for (Enumeration<LedgerEntry> readEntries = lh.readEntries(0, numEntries - 1);
-                    readEntries.hasMoreElements();) {
+                     readEntries.hasMoreElements(); ) {
                     LedgerEntry entry = readEntries.nextElement();
                     // ButeBufs not reference counter
                     assertTrue("Can't release entry " + entry.getEntryId() + ": ref = " + entry.data.refCnt(),
@@ -699,18 +764,18 @@ public class BookKeeperTest extends BookKeeperClusterTestCase {
             try (LedgerHandle lh = bkc.openLedger(ledgerId, digestType, "testPasswd".getBytes())) {
                 assertEquals(numEntries - 1, lh.readLastConfirmed());
                 for (Enumeration<LedgerEntry> readEntries = lh.readEntries(0, numEntries - 1);
-                    readEntries.hasMoreElements();) {
+                     readEntries.hasMoreElements(); ) {
                     LedgerEntry entry = readEntries.nextElement();
                     entry.getEntry();
                     try {
                         entry.getEntry();
                         fail("entry data accessed twice");
-                    } catch (IllegalStateException ok){
+                    } catch (IllegalStateException ok) {
                     }
                     try {
                         entry.getEntryInputStream();
                         fail("entry data accessed twice");
-                    } catch (IllegalStateException ok){
+                    } catch (IllegalStateException ok) {
                     }
                 }
             }
@@ -787,13 +852,13 @@ public class BookKeeperTest extends BookKeeperClusterTestCase {
         conf.setUseV2WireProtocol(true);
         try (BookKeeperTestClient bkc = new BookKeeperTestClient(conf);) {
             try (WriteHandle wh = result(bkc.newCreateLedgerOp()
-                    .withEnsembleSize(3)
-                    .withWriteQuorumSize(3)
-                    .withAckQuorumSize(2)
-                    .withPassword("".getBytes())
-                    .withWriteFlags(WriteFlag.DEFERRED_SYNC)
-                    .execute())) {
-               result(wh.appendAsync("test".getBytes()));
+                .withEnsembleSize(3)
+                .withWriteQuorumSize(3)
+                .withAckQuorumSize(2)
+                .withPassword("".getBytes())
+                .withWriteFlags(WriteFlag.DEFERRED_SYNC)
+                .execute())) {
+                result(wh.appendAsync("test".getBytes()));
             }
         }
     }
@@ -804,14 +869,14 @@ public class BookKeeperTest extends BookKeeperClusterTestCase {
         conf.setUseV2WireProtocol(true);
         try (BookKeeperTestClient bkc = new BookKeeperTestClient(conf);) {
             try (WriteHandle wh = result(bkc.newCreateLedgerOp()
-                    .withEnsembleSize(3)
-                    .withWriteQuorumSize(3)
-                    .withAckQuorumSize(2)
-                    .withPassword("".getBytes())
-                    .withWriteFlags(WriteFlag.NONE)
-                    .execute())) {
-               result(wh.appendAsync("".getBytes()));
-               result(wh.force());
+                .withEnsembleSize(3)
+                .withWriteQuorumSize(3)
+                .withAckQuorumSize(2)
+                .withPassword("".getBytes())
+                .withWriteFlags(WriteFlag.NONE)
+                .execute())) {
+                result(wh.appendAsync("".getBytes()));
+                result(wh.force());
             }
         }
     }
